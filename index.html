@@ -1,45 +1,219 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>A-Frame VR</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/aframe/1.4.2/aframe.min.js"></script>
-  </head>
-  <body>
-    <a-scene>
-      
-      <!-- DAFTAR ASET -->
-      <a-assets>
-        <a-asset-item id="model3d" src="model.glb"></a-asset-item>
-      </a-assets>
-
-      <!-- KAMERA STATIS -->
-      <!-- wasd-controls="enabled: false" mematikan tombol WASD & Panah secara total -->
-      <a-camera 
-        position="1.5 1 0" 
-        look-controls="pointerLockEnabled: false" 
-        wasd-controls="enabled: false">
-      </a-camera>
-
-      <!-- MODEL 3D -->
-      <a-gltf-model 
-        src="#model3d" 
-        position="0 0 0" 
-        scale="0.7 0.7 0.7">
-      </a-gltf-model>
-
-      <!-- LANTAI -->
-      <a-plane 
-        position="0 0 0" 
-        rotation="-90 0 0" 
-        width="20" 
-        height="20" 
-        color="#7BC8A4">
-      </a-plane>
-
-      <!-- LANGIT -->
-      <a-sky color="#ECECEC"></a-sky>
-
-    </a-scene>
-  </body>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A-Frame VR | Api dan Piano</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/aframe/1.4.2/aframe.min.js"></script>
+  <style>
+    body {margin:0;font-family:system-ui,sans-serif}
+    #help {position:fixed;z-index:5;top:16px;left:16px;max-width:340px;background:#142332e8;color:white;padding:14px 18px;border-radius:12px;font-size:14px;line-height:1.6;pointer-events:none}
+    #start {position:fixed;z-index:10;inset:0;display:grid;place-items:center;background:#112131b8;color:white}
+    #start section {max-width:390px;margin:20px;padding:28px;border-radius:18px;background:#142332;text-align:center}
+    button {padding:12px 22px;border:0;border-radius:8px;background:#70e6bb;font-size:16px;font-weight:bold;cursor:pointer}
+  </style>
+  <script>
+    // Piano sintetis. Tidak membutuhkan MP3; browser membutuhkan klik awal.
+    let audioContext;
+    async function unlockAudio() {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) throw new Error('Web Audio tidak tersedia');
+      if (!audioContext) audioContext = new AudioContextClass();
+      if (audioContext.state !== 'running') await audioContext.resume();
+      if (audioContext.state !== 'running') throw new Error('Audio belum diizinkan');
+    }
+    async function playPiano() {
+      await unlockAudio();
+      const now = audioContext.currentTime;
+      // Arpeggio C mayor, dengan harmonik dan peluruhan mirip piano.
+      [261.63,329.63,392,523.25].forEach((frequency,index) => {
+        const start = now + index * 0.18;
+        [1,2,3,4].forEach((harmonic,h) => {
+          const oscillator = audioContext.createOscillator();
+          const envelope = audioContext.createGain();
+          oscillator.type = 'sine';
+          oscillator.frequency.value = frequency * harmonic;
+          envelope.gain.setValueAtTime(0,start);
+          envelope.gain.linearRampToValueAtTime(0.12 / Math.pow(harmonic,1.7),start+0.008);
+          envelope.gain.exponentialRampToValueAtTime(0.0001,start+1.8/(1+h*0.25));
+          oscillator.connect(envelope); envelope.connect(audioContext.destination);
+          oscillator.start(start); oscillator.stop(start+2);
+          oscillator.onended = () => {oscillator.disconnect(); envelope.disconnect();};
+        });
+      });
+    }
+    // Memainkan klip animasi GLB hanya setelah api diaktifkan.
+    AFRAME.registerComponent('fire-animation', {
+      init: function () {
+        this.mixer = null;
+        this.root = null;
+        this.onLoaded = event => {
+          this.cleanup();
+          this.root = event.detail.model;
+          const clips = this.root.animations || [];
+          if (!clips.length) {
+            console.warn('animated_fire.glb tidak memiliki klip animasi.');
+            return;
+          }
+          this.mixer = new AFRAME.THREE.AnimationMixer(this.root);
+          clips.forEach(clip => {
+            this.mixer.clipAction(clip).setLoop(AFRAME.THREE.LoopRepeat, Infinity).play();
+          });
+        };
+        this.el.addEventListener('model-loaded', this.onLoaded);
+        const model = this.el.getObject3D('mesh');
+        if (model) this.onLoaded({detail: {model: model}});
+      },
+      tick: function (time, delta) {
+        if (this.mixer && this.el.object3D.visible) {
+          this.mixer.update(Math.min(delta || 0, 100) / 1000);
+        }
+      },
+      cleanup: function () {
+        if (this.mixer) {
+          this.mixer.stopAllAction();
+          this.mixer.uncacheRoot(this.root);
+        }
+        this.mixer = null;
+        this.root = null;
+      },
+      remove: function () {
+        this.el.removeEventListener('model-loaded', this.onLoaded);
+        this.cleanup();
+      }
+    });
+    AFRAME.registerComponent('gaze-interactions', {
+      init: function () {
+        this.target = null; this.lit = false; this.lastPiano = -Infinity;
+        this.previousButtons = new Map(); this.messageUntil = 0;
+        this.cameraEl = document.querySelector('#camera');
+        this.reticle = document.querySelector('#reticle');
+        this.prompt = document.querySelector('#prompt');
+        this.onKey = event => {
+          if (!['KeyE','Enter','Space'].includes(event.code) || event.repeat) return;
+          if (document.querySelector('#start').style.display !== 'none') return;
+          event.preventDefault(); this.activate();
+        };
+        window.addEventListener('keydown',this.onKey);
+      },
+      label: function () {
+        if (!this.target) return '';
+        return this.target.id === 'fireTarget' ? (this.lit ? 'API MENYALA' : '[E / Enter / Spasi / A] Nyalakan api') : '[E / Enter / Spasi / A] Mainkan piano';
+      },
+      setTarget: function (target) {
+        if (this.target === target) return;
+        if (this.target) {
+          this.target.setAttribute('material','opacity',0);
+          document.querySelector('#' + this.target.dataset.label).setAttribute('visible',false);
+        }
+        this.target = target; this.messageUntil = 0;
+        if (target) {
+          target.setAttribute('material','color','#70e6bb');
+          target.setAttribute('material','opacity',0.5);
+          document.querySelector('#' + target.dataset.label).setAttribute('visible',true);
+        }
+        this.reticle.setAttribute('visible',!!target);
+        this.prompt.setAttribute('visible',!!target);
+        this.reticle.setAttribute('material','color',target ? '#70e6bb' : '#ffffff');
+        this.reticle.setAttribute('scale',target ? '1.5 1.5 1.5' : '1 1 1');
+        this.prompt.setAttribute('value',this.label());
+      },
+      activate: function () {
+        if (!this.target) return;
+        if (this.target.id === 'fireTarget') {
+          this.lit = true;
+          document.querySelector('#fire').setAttribute('visible',true);
+          this.prompt.setAttribute('value','API MENYALA');
+        } else {
+          if (performance.now()-this.lastPiano < 2200) return;
+          this.lastPiano = performance.now();
+          this.messageUntil = performance.now()+2200;
+          this.prompt.setAttribute('value','Piano sedang berbunyi...');
+          playPiano().catch(() => {
+            this.messageUntil = performance.now()+4000;
+            this.prompt.setAttribute('value','Audio terkunci. Klik Aktifkan suara di layar.');
+            document.querySelector('#start').style.display = 'grid';
+          });
+        }
+      },
+      tick: function (time,delta) {
+        const raycaster = this.cameraEl.components.raycaster;
+        const hits = raycaster ? raycaster.intersectedEls : [];
+        this.setTarget(hits.find(el => el.classList.contains('interactable')) || null);
+        if (this.messageUntil && performance.now()>this.messageUntil) {
+          this.messageUntil = 0; this.prompt.setAttribute('value',this.label());
+        }
+        // Gamepad standar: tombol 0 = A (Xbox) / Cross (PlayStation).
+        let pads = [];
+        try { pads = navigator.getGamepads ? navigator.getGamepads() : []; } catch (_) { return; }
+        const activeIndices = new Set();
+        for (const pad of pads) {
+          if (!pad || !pad.connected) continue;
+          activeIndices.add(pad.index);
+          const pressed = !!(pad.buttons[0] && pad.buttons[0].pressed);
+          const wasPressed = this.previousButtons.get(pad.index) || false;
+          this.previousButtons.set(pad.index,pressed);
+          if (document.querySelector('#start').style.display !== 'none') continue;
+          const look = this.cameraEl.components['look-controls'];
+          if (look && !this.el.sceneEl.is('vr-mode')) {
+            const deadzone = value => Math.abs(value || 0) > 0.18 ? value : 0;
+            const seconds = Math.min(delta || 0,50)/1000;
+            look.yawObject.rotation.y -= deadzone(pad.axes[2])*1.6*seconds;
+            look.pitchObject.rotation.x -= deadzone(pad.axes[3])*1.6*seconds;
+            look.pitchObject.rotation.x = Math.max(-Math.PI/2,Math.min(Math.PI/2,look.pitchObject.rotation.x));
+          }
+          if (pressed && !wasPressed) this.activate();
+        }
+        for (const index of this.previousButtons.keys()) {
+          if (!activeIndices.has(index)) this.previousButtons.delete(index);
+        }
+      },
+      remove: function () { window.removeEventListener('keydown',this.onKey); }
+    });
+  </script>
+</head>
+<body>
+  <div id="help"><strong>Interaksi VR</strong><br>Bidik penanda hingga hijau.<br>E / Enter / Spasi atau gamepad A / Cross.<br>Geser mouse sambil klik untuk melihat sekitar.<br>Stik kanan gamepad: putar pandangan.<br><span id="assetStatus"></span></div>
+  <div id="start"><section><h2>Api &amp; Piano</h2><p>Klik sekali untuk mengaktifkan suara. Setelah itu, bidik penanda lalu tekan tombol interaksi.</p><button id="startButton">Mulai / Aktifkan suara</button><p id="audioStatus" role="status"></p></section></div>
+  <a-scene gaze-interactions>
+    <a-assets timeout="5000"><a-asset-item id="model3d" src="model.glb"></a-asset-item></a-assets>
+    <!-- Kamera tetap; tanpa perpindahan WASD. Raycaster hanya membidik penanda. -->
+    <a-camera id="camera" position="1.5 1 0" look-controls="pointerLockEnabled: false" wasd-controls="enabled: false" raycaster="objects: .interactable; far: 12; interval: 0">
+      <a-ring id="reticle" visible="false" position="0 0 -0.8" radius-inner="0.006" radius-outer="0.01" material="shader: flat; color: white; depthTest: false" ></a-ring>
+      <a-text id="prompt" visible="false" value="" position="0 -0.16 -0.8" width="0.95" align="center" color="#ffffff" material="depthTest: false" ></a-text>
+    </a-camera>
+    <a-gltf-model id="worldModel" src="#model3d" position="0 0 0" scale="0.7 0.7 0.7"></a-gltf-model>
+    <!-- Posisi interaksi adalah koordinat dunia, tidak ikut skala model. -->
+    <a-sphere id="fireTarget" class="interactable" position="-2 0.5 -2" radius="0.32" data-label="fireLabel" data-color="#ffad42" material="shader: flat; color: #ffad42; opacity: 0; transparent: true; depthWrite: false"></a-sphere>
+    <a-text id="fireLabel" visible="false" value="" position="-2 1.05 -2" align="center" width="3" color="#bc5b09" rotation="0 60 0" side="double"></a-text>
+    <!-- Letakkan animated_fire.glb di folder yang sama dengan HTML.
+         Ubah scale jika ukuran asli model api perlu disesuaikan. -->
+    <a-gltf-model id="fire" src="animated_fire.glb" position="-2 0.5 -2"
+      scale="1 1 1" visible="false" fire-animation></a-gltf-model>
+    <a-sphere id="pianoTarget" class="interactable" position="0 1 1" radius="0.32" data-label="pianoLabel" data-color="#668cff" material="shader: flat; color: #668cff; opacity: 0; transparent: true; depthWrite: false"></a-sphere>
+    <a-text id="pianoLabel" visible="false" value="" position="0 1.55 1" rotation="0 125 0" align="center" width="3" color="#304ca5" side="double"></a-text>
+    <a-plane position="0 0 0" rotation="-90 0 0" width="20" height="20" color="#7BC8A4"></a-plane>
+    <a-sky color="#ECECEC"></a-sky>
+  </a-scene>
+  <script>
+    document.querySelector('#startButton').addEventListener('click', async () => {
+      try {
+        await unlockAudio();
+        document.querySelector('#start').style.display = 'none';
+      } catch (_) {
+        document.querySelector('#audioStatus').textContent = 'Suara belum tersedia. Anda tetap dapat mencoba api; klik lagi untuk mencoba suara.';
+        // Api tetap bisa digunakan meski perangkat tidak mendukung audio.
+        document.querySelector('#start').style.display = 'none';
+        document.querySelector('#assetStatus').textContent = 'Audio belum aktif. Klik layar untuk mencoba lagi.';
+      }
+    });
+    document.querySelector('#fire').addEventListener('model-error', () => {
+      document.querySelector('#assetStatus').textContent = 'animated_fire.glb gagal dimuat. Letakkan file di folder yang sama.';
+    });
+    document.querySelector('#worldModel').addEventListener('model-error', () => {
+      document.querySelector('#assetStatus').textContent = 'model.glb gagal dimuat. Letakkan model di folder yang sama.';
+    });
+    document.addEventListener('click', () => { unlockAudio().catch(() => {}); });
+  </script>
+</body>
 </html>
